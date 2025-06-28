@@ -46,8 +46,3 @@ The rover was tested across various obstacle scenarios and demonstrated:
 ## 🔬 Academic Context
 
 This code was developed as part of a research prototype exploring low-cost autonomy for Indian road infrastructure. It is accompanied by a research paper that investigates latency, decision logic, and performance metrics on urban-like unstructured paths.
-
-## 📚 Citation
-
-If you use this code in your research or publication, please cite the following:
-
