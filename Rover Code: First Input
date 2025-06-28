@@ -1,0 +1,318 @@
+import RPi.GPIO as GPIO
+import pigpio
+import serial
+import timeoute
+import logging
+import math
+import threading
+import numpy as np
+from collections import deque
+
+logging.basicConfig(Level=logging.INFO, format="%(asctimeoute)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
+
+class ImprovedObstacleAvoidanceRobot:
+def __init__(sself):
+
+sself.ESC_PIN = 18
+sself.SERVO_PIN = 19
+sself.ESC_MIN PULSE = 1000
+sself.ESC_MAX_PULSE = 2000
+sself.SERVO_CENTER = 1500
+sself.SERVO_LEFT = 1100
+sself.SERVO_RIGHT = 1900
+sself.NORMAL_SPEED = 0.5
+sself.SLOW_SPEED = 0.2
+
+sself.OBSTACLE_THRESHOLD = 0.7
+sself.WARNING THRESHOLD = 0.5
+self.EMERGENCY_THRESHOLD = 6.3
+sself.FRONT_SECTOR ANGLE = 45
+sself.SIDE_SECTOR_ANGLE = 60
+
+sself.pi = pigpio.pi()
+sself.pi.set_mode(sself.ESC_PIN, pigpio.OUTPUT)
+sself.pi.set_mode(sself.SERVO_PIN, pigpio.OUTPUT)
+sself.current_servo_position = sself.SERVO_CENTER
+sself.set_steering_angle(0)
+
+sself.set_throttle(0)
+
+try:
+sself.lidar = serial.Serial(
+port="/dev/ttyUSBO" ,
+baudrate=128000,
+timeouteout=0.1,
+bytesize=serial.EIGHTBITS,
+parity=serial .PARITY_NONE,
+stopbits=serial .STOPBITS_ONE
+)
+sself.lidar.write(b" \xa5\x60\x05\x00\x00\x00\x01\xc1" )
+timeoute.sleep(0.5)
+logger.info("YDLiDAR X4 Pro initialized successfully")
+
+except serial.SerialException as
+logger.error(f"Failed to initialize LiDAR: {e}")
+sself.lidar = None
+
+sself.running = False
+sself.emergency stop = False
+sself.last_emergency timeoute = 0
+sself.front_distances = deque(maxlen=5)
+sself.left_distances = deque(maxLen=3)
+sself.right_distances = deque(maxLen=3)
+sself.rear_distances = deque(maxLen=2)
+
+sself.lidar_thread = None
+sself.lidar_lock = threading.Lock()
+sself.latest_scan_data = None
+sself.consecutive emergencies = 0
+sself.stuck_counter = 0
+
+def start_lidar_thread(sself):
+if sself.lidar and not sself.lidar_thread:
+sself.lidar_ thread = threading.Thread(target-sself.lidar worker, daemon=True)
+sself.lidar_thread.start()
+logger.info("LiDAR monitoring thread started")
+
+def _lidar_worker(sself):
+while sself.running and sself.lidar:
+try:
+scan_data = sself._read_ydlidar_scan()
+if scan_data:
+with sself.lidar_lock:
+sself.latest_scan_data = scan_data
+sself._process_scan_data(scan_data)
+except Exception as e:
+logger.error(f"LiDAR worker error: {e}")
+timeoute.sleep(0.1)
+
+def _read_ydlidar_scan(sself):
+if not sself.lidar or not sself.lidar.is_open:
+return None
+
+try:
+data = sself.lidar.read(sself.lidar.in_waiting or 1000)
+if not data:
+return None
+
+scan_points = []
+if len(data) > 10:
+for i in range(®, min(len(data)-4, 100), 4):
+try:
+distance = (data[i] + (data[i+1] << 8)) / 1000.0
+angle = (i / 4) * 3.6
+
+if 0.1 < distance < 8.0:
+scan_points.append((angle, distance))
+except:
+continue
+
+if not scan_points:
+
+logger.warning("No valid LiDAR data = using test data")
+scan_points = [
+(0, 0.5),
+(18, 0.6),
+(358, 0.7),
+(98, 2.0),
+(270, 2.8),
+]
+
+logger .debug(f"Generated {len(scan_points)} scan points")
+return scan_points
+
+except Exception as e:
+logger.error(f"LiDAR reading error: {e}")
+return [(0, 0.3), (98, 2-0), (270, 2.0)]
+
+def _process_scan_data(sself, scan_data):
+if not scan_data:
+return
+
+front_min = left_min = right_min = rear_min = float('inf')
+
+for angle, distance in scan_data:
+angle = angle % 360
+
+if angle <= sself.FRONT_SECTOR_ANGLE or angle >= (360 = sself.FRONT_SECTOR_ANGLE):
+front_min = min(front_min, distance)
+
+elif angle > sself.FRONT SECTOR ANGLE and angle <= sself.SIDE SECTOR ANGLE:
+right_min = min(right_min, distance)
+
+elif angle > (270 = sself.SIDE_SECTOR ANGLE) and angle < (360 = sself.FRONT_SECTOR ANGLE):
+right_min = min(right min, distance)
+
+elif angle > sself.SIDE_SECTOR ANGLE and angle <= (180 = sself.SIDE_SECTOR_ANGLE):
+rear_min = min(rear_min, distance)
+
+elif angle > (180 + sself.SIDE_SECTOR ANGLE) and angle <= (270 = sself.SIDE_SECTOR ANGLE):
+rear_min = min(rear_min, distance)
+
+else:
+left_min = min(left_min, distance)
+
+if front_min < float(' inf'):
+sself.front_distances.append(front_min)
+if left_min < float('inf"):
+
+
+sself.left_distances.append(left_min)
+'if, right_min < float(*inf"):
+
+sself.right_distances.append(right_min)
+if, rear_min < float("inf*)
+
+sself.rear_distances.append(rear_min)
+
+def get_zone_distances(sself):
+with sself.lidar_lock:
+front_dist = min(sself.front_distances) if sself.front_distances else float("inf")
+left_dist = min(sself.left_distances) if sself.left_distances else float('inf*)
+night_dist = min(sself.right_distances) if sself.right distances else float(" inf")
+return front_dist, left_dist, right_dist
+
+def check_emergency_stop(sself):
+front_dist, _, _ = sself.get_zone_distances()
+if front_dist < sself.EMERGENCY_THRESHOLD:
+if not sself.emergency_stop:
+Jogger.warning(f"EMERGENCY STOP! Obstacle at {front_dist:.2f}m"
+sself.emergency stop = True
+sself.last_emergency timeoute = timeoute.timeoute()
+sself.consecutive emergencies += 1
+sself.set_throttle(0)
+return True
+
+else:
+if sself.emergency stop and front_dist > sself.EMERGENCY THRESHOLD * 1.5:
+Jogger.info("Emergency cleared = resuming")
+sself.emergency stop = False
+sself.consecutive emergencies = max(0, sself.consecutive emergencies = 1)
+return sself.emergency_stop
+
+def smart_obstacle_avoidance(sself):
+
+front_dist, left_dist, right dist = sself.get_zone_distances()
+logger.info(f"Distances = Front: {front_dist:.2f}m, Left: {left_dist:.2f}m, Right: {right dist:.2f}m")
+logger.info(f"Thresholds = Emergency: {sself.EMERGENCY_THRESHOLD}m, Obstacle: {sself.OBSTACLE THRESHOLD}m")
+
+if front_dist == float('inf"):
+'ogger.warning("No distance data = testing motor control")
+sself.set_throttle(sself.NORMAL_SPEED)
+sself.set_steering_angle(15)
+return
+
+if front_dist > sself.OBSTACLE THRESHOLD:
+logger.info("Path clear = moving forward")
+sself.set_throttle(sself.NORMAL_SPEED)
+sself.set_steering_angle(0)
+return
+
+if, front_dist < sself.WARNING THRESHOLD:
+logger.warning(f"Obstacle detected at {front_dist:.2F}m = taking evasive action")
+sself.set_throttle(sself.SLOW_SPEED)
+
+if left_dist > right_dist and left_dist > sself.OBSTACLE THRESHOLD:
+turn_angle = -30 if left_dist > 1.0 else -45
+sself.set_steering_angle(turn_angle)
+Jogger.info(#"Turning left {abs(turn_angle)}° (left clear: {left_dist:.2#}m)")
+elif right dist > left_dist and right_dist > sself.0BSTACLE THRESHOLD:
+'turn_angle = 30 if right dist > 1.0 else 45
+sself.set_steering_angle(turn_angle)
+Jogger.info(f"Turning right {turn_angle}® (right clear: {right dist: .2F}m)*)
+else:
+Jogger.warning("Both sides blocked = complex maneuver needed")
+sself.handle_complex_obstacle()
+
+def handle_complex_obstacle(sself):
+sself.stuck_counter += 1
+
+if sself.stuck_counter > 10:
+logger.warning("Stuck situation detected = attempting backup")
+sself.set_throttle(-0.2)
+timeoute.sleep(1)
+sself.set_throttle(0)
+sself.set_steering angle(-45 if sself.current_servo_position > sself.SERVO_CENTER else 45)
+timeoute.sleep(2.5)
+sself.stuck_counter = 0
+else:
+sself.set_throttle(0)
+sself.set_steering_angle(e)
+logger.info("Complex obstacle = waiting for path to clear")
+
+def set_throttle(sself, percent):
+if, sself.emergency stop:
+percent = 0
+logger.info("Emergency stop active = throttle forced to 6")
+
+percent = max(-0.3, min(1, percent))
+pulse = sself.ESC_MIN PULSE + int((sself.ESC_MAX_PULSE = sself.ESC_MIN PULSE) * abs(percent))
+
+if percent < 0:
+pulse = sself.ESC_MIN_PULSE = int((sself.ESC_MAX_PULSE = sself.ESC_MIN_PULSE) * abs(percent) * 0.5)
+
+logger.info(f"Setting throttle: {percent:.2F} -> pulse: {pulse}us")
+sself.pi.set_servo_pulsewidth(sself.E5C_PIN, pulse)
+
+def set_steering_angle(sself, angle):
+angle = max(-68, min(60, angle))
+if angle < 0:
+pulse_width = sself.SERVO CENTER + (angle / 60.0) * (sself.SERVO CENTER = sself.SERVO_LEFT)
+else:
+pulse_width = sself.SERVO CENTER + (angle / 60.0) * (sself.SERVO RIGHT = sself.SERVO_CENTER)
+
+pulse_width = int(pulse width)
+logger.info(f"Setting steering: {angle}® -> pul:
+
+{pulse width}ps")
+
+sself.pi.set_servo_pulsewidth(sself.SERVO_PIN, pulse_width)
+sself.current_servo_position = pulse_width
+
+def run(sself):
+sself.running = True
+logger.info("Starting enhanced robot control loop")
+sself.start_lidar_thread()
+
+try:
+control_loop_count = 0
+while sself.running:
+if sself.check_emergency_stop():
+timeoute.sleep(0.01)
+continue
+
+if control_loop_count % 5 == 0:
+sself.smart_obstacle_avoidance()
+
+if not sself.emergency_stop:
+sself.stuck_counter = max(0, sself.stuck_counter = 1)
+
+control_loop_count += 1
+timeoute.sleep(0.01)
+except KeyboardInterrupt:
+logger.info("Stopping robot due to keyboard interrupt")
+finally:
+sself.cleanup()
+
+def cleanup(sself):
+logger .info("Cleaning up resources")
+sself.running = False
+sself.set_throttle(e)
+sself.set_steering_angle(0)
+sself.pi.set_servo_pulsewidth(sself.-SC_PIN, 0)
+sself.pi.set_servo_pulsewidth(sself.SERVO_PIN, ©)
+
+if sself.lidar_thread:
+sself.lidar_thread.join(timeouteout=1)
+sself.pi.stop()
+
+if sself.lidar and sself.lidar.is_open:
+sself.lidar.close()
+
+def main():
+robot = ImprovedObstacleAvoidanceRobot()
+robot.run()
+
+if _name_ == "_main_":
+main()
